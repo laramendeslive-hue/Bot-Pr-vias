@@ -1,46 +1,106 @@
 import telebot
 import time
-import random
+import sqlite3
+from threading import Thread
+from telebot import types
 
-# --- CONFIGURAÇÕES OFICIAIS ---
-CHAVE_API = "8701938906:AAGiR_5JSl3cO6lutKkpc2cUBFbt9WXkNWc"
-ID_CANAL = "-1003945705854" 
+# --- CONFIGURAÇÕES ---
+TOKEN = "8701938906:AAGiR_5JSl3cO6lutKkpc2cUBFbt9WXkNWc"
+ID_CANAL = "-1003945705854"
+INTERVALO = 900 # 15 minutos
 
-# --- AJUSTE DE TEMPO ---
-# 900 segundos = 15 minutos | 1200 segundos = 20 minutos
-INTERVALO = 900 
+bot = telebot.TeleBot(TOKEN)
 
-bot = telebot.TeleBot(CHAVE_API)
+# --- BANCO DE DADOS (Agora salva tipo de mídia e botões) ---
+def iniciar_db():
+    conn = sqlite3.connect('esteira_vendas.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS posts 
+                      (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                       tipo TEXT, file_id TEXT, legenda TEXT, link_url TEXT)''')
+    conn.commit()
+    return conn
 
-# --- SUA LISTA DE POSTAGENS ---
-# Você pode colocar dezenas de frases aqui! 
-# O bot vai escolher uma por uma aleatoriamente.
-postagens = [
-    "Dica da Vision Lens: Use iluminação natural para suas fotos de IA ficarem mais reais! 📸",
-    "Temos contas de TikTok aquecidas e prontas para o Shop. Chama no PV! 💸",
-    "Já conferiu nosso catálogo de hoje? Não perca as novidades. 🚀",
-    "A constância é a chave do sucesso no tráfego orgânico. Vamos pra cima! 🔥",
-    "Transforme suas ideias em realidade com nossas ferramentas de IA. 🤖",
-    "Provas sociais de hoje: Mais um cliente faturando no TikTok! ✅"
-]
+db = iniciar_db()
 
-def iniciar_autopost():
-    print("🚀 Bot da Bia rodando a cada 15 minutos!")
+# --- COMANDOS DE GERENCIAMENTO ---
+@bot.message_handler(commands=['start'])
+def boas_vindas(message):
+    msg = ("Bia, para adicionar à esteira, envie a FOTO ou VÍDEO com uma legenda.\n\n"
+           "Para colocar BOTÃO, escreva o link na última linha da legenda assim:\n"
+           "LINK: https://seusite.com")
+    bot.reply_to(message, msg)
+
+@bot.message_handler(content_types=['photo', 'video'])
+def salvar_na_esteira(message):
+    link = ""
+    legenda = message.caption if message.caption else ""
     
+    # Extrai o link se houver
+    if "LINK:" in legenda:
+        partes = legenda.split("LINK:")
+        legenda = partes[0].strip()
+        link = partes[1].strip()
+
+    file_id = ""
+    tipo = ""
+
+    if message.content_type == 'photo':
+        file_id = message.photo[-1].file_id
+        tipo = "foto"
+    else:
+        file_id = message.video.file_id
+        tipo = "video"
+
+    cursor = db.cursor()
+    cursor.execute('INSERT INTO posts (tipo, file_id, legenda, link_url) VALUES (?, ?, ?, ?)', 
+                   (tipo, file_id, legenda, link))
+    db.commit()
+    bot.reply_to(message, f"✅ {tipo.capitalize()} adicionado à esteira de 15 minutos!")
+
+@bot.message_handler(commands=['limpar'])
+def limpar_esteira(message):
+    cursor = db.cursor()
+    cursor.execute('DELETE FROM posts')
+    db.commit()
+    bot.reply_to(message, "🗑 Esteira limpa!")
+
+# --- MOTOR DA ESTEIRA (SEQUENCIAL) ---
+def loop_esteira():
+    index_atual = 0
     while True:
         try:
-            # Escolhe uma postagem aleatória da lista
-            post_da_vez = random.choice(postagens)
-            
-            bot.send_message(ID_CANAL, post_da_vez)
-            print(f"✅ Postado agora: {post_da_vez[:30]}...")
-            
-            # Espera os 15 minutos
-            time.sleep(INTERVALO) 
-            
+            cursor = db.cursor()
+            cursor.execute('SELECT * FROM posts ORDER BY id ASC')
+            posts = cursor.fetchall()
+
+            if posts:
+                # Se o índice passou do tamanho da lista, volta pro zero (loop infinito)
+                if index_atual >= len(posts):
+                    index_atual = 0
+                
+                post = posts[index_atual]
+                tipo, file_id, legenda, url = post[1], post[2], post[3], post[4]
+
+                # Criar botão se houver link
+                markup = None
+                if url:
+                    markup = types.InlineKeyboardMarkup()
+                    markup.add(types.InlineKeyboardButton("SAIBA MAIS / COMPRAR 🚀", url=url))
+
+                # Enviar de acordo com o tipo
+                if tipo == "foto":
+                    bot.send_photo(ID_CANAL, file_id, caption=legenda, reply_markup=markup)
+                else:
+                    bot.send_video(ID_CANAL, file_id, caption=legenda, reply_markup=markup)
+
+                index_atual += 1
+                time.sleep(INTERVALO)
+            else:
+                time.sleep(30) # Espera 30s se não tiver nada na lista
         except Exception as e:
-            print(f"❌ Erro: {e}. Tentando novamente em 1 minuto...")
+            print(f"Erro: {e}")
             time.sleep(60)
 
-if __name__ == "__main__":
-    iniciar_autopost()
+Thread(target=loop_esteira).start()
+bot.polling(none_stop=True)
